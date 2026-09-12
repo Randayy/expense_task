@@ -1,0 +1,21 @@
+# Postgres для розробки. Порт 5434, щоб не конфліктувати з локальними інстансами.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: expense-db
+    environment:
+      POSTGRES_USER: expense
+      POSTGRES_PASSWORD: expense
+      POSTGRES_DB: expense_approval
+    ports:
+      - "5434:5432"
+    volumes:
+      - expense-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U expense -d expense_approval"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  expense-pgdata:

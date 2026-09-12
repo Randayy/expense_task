@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Expense Approval</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Вхід і реєстрація -->
+<section id="login-screen" class="screen centered">
+  <div class="card login-card">
+    <h1>Expense Approval</h1>
+    <p class="muted">Узгодження заявок на відшкодування витрат</p>
+
+    <div class="switcher">
+      <button class="switch active" data-mode="login">Вхід</button>
+      <button class="switch" data-mode="register">Реєстрація</button>
+    </div>
+
+    <form id="login-form">
+      <label>Email
+        <input name="email" type="email" required autocomplete="username">
+      </label>
+      <label>Пароль
+        <input name="password" type="password" required autocomplete="current-password">
+      </label>
+      <button type="submit">Увійти</button>
+    </form>
+
+    <form id="register-form" hidden>
+      <label>Ім'я
+        <input name="name" required minlength="2" autocomplete="name">
+      </label>
+      <label>Email
+        <input name="email" type="email" required autocomplete="username">
+      </label>
+      <label>Пароль
+        <input name="password" type="password" required minlength="8" autocomplete="new-password">
+        <small class="muted">Щонайменше 8 символів</small>
+      </label>
+      <button type="submit">Зареєструватися</button>
+      <p class="muted hint">Нові користувачі отримують роль співробітника.
+         Права погоджувача видає адміністратор.</p>
+    </form>
+
+    <p id="auth-error" class="error" hidden></p>
+  </div>
+</section>
+
+<!-- Основний екран -->
+<section id="app-screen" class="screen" hidden>
+  <header class="topbar">
+    <div>
+      <strong id="user-name"></strong>
+      <span id="user-roles" class="muted"></span>
+    </div>
+    <button id="logout" class="link">Вийти</button>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab" data-tab="mine">Мої заявки</button>
+    <button class="tab" data-tab="queue">Черга на погодження <span id="queue-badge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="admin">Адміністрування</button>
+  </nav>
+
+  <!-- Вкладка заявника -->
+  <div id="tab-mine" class="tab-panel" hidden>
+    <details class="card" id="new-claim-block">
+      <summary>Подати нову заявку</summary>
+      <form id="claim-form" class="claim-form">
+        <label>Сума, USD
+          <input name="amount_usd" type="number" step="0.01" min="0.01" required placeholder="120.00">
+        </label>
+        <label>Категорія
+          <select name="category" required></select>
+          <small id="route-hint" class="muted"></small>
+        </label>
+        <label>Дата витрати
+          <input name="expense_date" type="date" required>
+        </label>
+        <label class="wide">Опис
+          <textarea name="description" rows="3" required minlength="5"
+                    placeholder="Що саме купували і для чого"></textarea>
+        </label>
+        <label class="wide">Деталі для оплати
+          <input name="payment_details" required placeholder="Картка ****1234 / IBAN / готівка">
+        </label>
+        <div class="wide form-actions">
+          <button type="submit">Надіслати на погодження</button>
+          <span id="claim-error" class="error"></span>
+        </div>
+      </form>
+    </details>
+
+    <div id="mine-list" class="list"></div>
+  </div>
+
+  <!-- Вкладка погоджувача -->
+  <div id="tab-queue" class="tab-panel" hidden>
+    <div id="queue-list" class="list"></div>
+  </div>
+
+  <!-- Вкладка адміністратора -->
+  <div id="tab-admin" class="tab-panel" hidden>
+    <div class="card">
+      <h2 class="block-title">Маршрутизація</h2>
+      <p class="muted">Кожній категорії — свій погоджувач. Заявки в категорію без
+         погоджувача подати не можна.</p>
+      <div id="routing-list"></div>
+    </div>
+
+    <div class="card">
+      <h2 class="block-title">Користувачі та ролі</h2>
+      <div id="users-list"></div>
+    </div>
+    <p id="admin-error" class="error"></p>
+  </div>
+</section>
+
+<!-- Картка заявки для погоджувача -->
+<dialog id="claim-dialog">
+  <div id="dialog-body"></div>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
