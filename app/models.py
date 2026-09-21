@@ -139,10 +139,27 @@ class AiReview(Base):
 
 
 class Session(Base):
-    """Сесія входу. Токен живе в httponly-кукі."""
+    """Сесія входу. Токен живе в httponly-кукі й має строк придатності."""
 
     __tablename__ = "sessions"
 
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LoginAttempt(Base):
+    """Невдалі спроби входу — щоб пароль не можна було підібрати перебором.
+
+    Успішний вхід стирає історію по цьому email.
+    """
+
+    __tablename__ = "login_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    ip: Mapped[str] = mapped_column(String(45))  # вистачить і на IPv6
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )

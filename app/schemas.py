@@ -45,7 +45,9 @@ class ClaimIn(BaseModel):
 class RejectIn(BaseModel):
     """Відхилення без коментаря не проходить — це правило живе тут."""
 
-    comment: str = Field(min_length=3, max_length=1000)
+    # Без min_length у Field — інакше користувач побачив би сухе
+    # «щонайменше 3 символів» замість пояснення, навіщо цей коментар.
+    comment: str = Field(default="", max_length=1000, validate_default=True)
 
     @field_validator("comment")
     @classmethod
@@ -63,6 +65,11 @@ class RolesIn(BaseModel):
 
 
 class RoutingIn(BaseModel):
-    """Адміністратор призначає погоджувача категорії."""
+    """Адміністратор призначає погоджувача категорії.
 
+    Категорія їде в тілі, а не в URL: назва «Software/Subscriptions» містить
+    слеш і як частина шляху не працює навіть у закодованому вигляді.
+    """
+
+    category: Category
     approver_id: int

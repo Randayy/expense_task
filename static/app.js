@@ -4,17 +4,23 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+// Вхід і реєстрація — єдині запити, де 401 означає «невірні дані»,
+// а не «сесія скінчилась». На них не можна викидати людину на форму входу,
+// і не можна підміняти повідомлення сервера своїм.
+const AUTH_PATHS = ["/api/login", "/api/register"];
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (res.status === 401) {
-    showLogin();
-    throw new Error("Потрібно увійти");
-  }
+
   const data = res.status === 204 ? null : await res.json();
-  if (!res.ok) throw new Error(errorText(data));
+
+  if (!res.ok) {
+    if (res.status === 401 && !AUTH_PATHS.includes(path)) showLogin();
+    throw new Error(errorText(data));
+  }
   return data;
 }
 
@@ -52,6 +58,16 @@ function esc(text) {
 let me = null;
 let activeTab = "mine";
 let poller = null;
+
+// Скільки заявок зараз показано в кожному списку. «Показати ще» збільшує це
+// число, а фонове оновлення перечитує рівно стільки ж — щоб список не стрибав.
+const PAGE_SIZE = 20;
+let shown = {
+  "mine-pending": PAGE_SIZE,
+  "mine-decided": PAGE_SIZE,
+  "queue-pending": PAGE_SIZE,
+  "queue-decided": PAGE_SIZE,
+};
 
 // --- вхід і реєстрація ------------------------------------------------------
 
@@ -145,8 +161,20 @@ function switchTab(name) {
 async function refresh() {
   if (!me) return;
   try {
-    if (me.roles.includes("employee")) renderMine(await api("/api/claims/mine"));
-    if (me.roles.includes("approver")) renderQueue(await api("/api/claims/queue"));
+    if (me.roles.includes("employee")) {
+      await renderSection("mine-pending", "/api/claims/mine", "pending", "Нових заявок немає");
+      await renderSection("mine-decided", "/api/claims/mine", "decided", "Поки нічого не розглянуто");
+    }
+    if (me.roles.includes("approver")) {
+      const pending = await renderSection(
+        "queue-pending", "/api/claims/queue", "pending", "Черга порожня — усе розглянуто");
+      await renderSection("queue-decided", "/api/claims/queue", "decided", "Ви ще нічого не розглядали");
+
+      // лічильник на вкладці рахує всі нерозглянуті, а не лише завантажену сторінку
+      const badge = $("#queue-badge");
+      badge.textContent = pending.total;
+      badge.hidden = pending.total === 0;
+    }
     if (me.roles.includes("admin") && activeTab === "admin") await renderAdmin();
   } catch (err) {
     // мовчимо: фонове оновлення не має смикати користувача повідомленнями
@@ -244,11 +272,31 @@ function claimCard(claim, { forApprover }) {
     </div>`;
 }
 
-function renderMine(claims) {
-  const list = $("#mine-list");
-  list.innerHTML = claims.length
-    ? claims.map((c) => claimCard(c, { forApprover: false })).join("")
-    : `<div class="empty">Поки що заявок немає</div>`;
+function moreButton(page, which) {
+  const left = page.total - page.items.length;
+  return left > 0
+    ? `<button class="secondary more" data-more="${which}">Показати ще (${left})</button>`
+    : "";
+}
+
+async function renderSection(which, path, state, emptyText) {
+  const page = await api(`${path}?state=${state}&limit=${shown[which]}`);
+  const forApprover = which.startsWith("queue");
+  const list = $("#" + which);
+
+  list.innerHTML = page.items.length
+    ? page.items.map((c) => claimCard(c, { forApprover })).join("") + moreButton(page, which)
+    : `<div class="empty">${emptyText}</div>`;
+
+  $("#" + which + "-count").textContent = page.total || "";
+
+  const more = list.querySelector("[data-more]");
+  if (more) {
+    more.addEventListener("click", () => {
+      shown[which] += PAGE_SIZE;
+      refresh();
+    });
+  }
 
   list.querySelectorAll("[data-withdraw]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -261,24 +309,14 @@ function renderMine(claims) {
       refresh();
     });
   });
-}
-
-function renderQueue(claims) {
-  const list = $("#queue-list");
-  list.innerHTML = claims.length
-    ? claims.map((c) => claimCard(c, { forApprover: true })).join("")
-    : `<div class="empty">Ваша черга порожня</div>`;
-
-  const pending = claims.filter((c) => c.status === "pending").length;
-  const badge = $("#queue-badge");
-  badge.textContent = pending;
-  badge.hidden = pending === 0;
 
   list.querySelectorAll("[data-open]").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.tagName !== "BUTTON") openClaim(Number(card.dataset.open));
     });
   });
+
+  return page;
 }
 
 // --- картка заявки для погоджувача -----------------------------------------
@@ -412,9 +450,12 @@ function renderRouting({ categories: rows, approvers }) {
     select.addEventListener("change", async () => {
       if (!select.value) return;
       await adminAction(() =>
-        api(`/api/admin/routing/${encodeURIComponent(select.dataset.category)}`, {
+        api("/api/admin/routing", {
           method: "PUT",
-          body: JSON.stringify({ approver_id: Number(select.value) }),
+          body: JSON.stringify({
+            category: select.dataset.category,
+            approver_id: Number(select.value),
+          }),
         }));
     });
   });

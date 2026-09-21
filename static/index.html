@@ -94,12 +94,28 @@
       </form>
     </details>
 
-    <div id="mine-list" class="list"></div>
+    <section class="group">
+      <h2 class="group-title">Очікують рішення <span id="mine-pending-count" class="count"></span></h2>
+      <div id="mine-pending" class="list"></div>
+    </section>
+
+    <section class="group">
+      <h2 class="group-title">Вже розглянуті <span id="mine-decided-count" class="count"></span></h2>
+      <div id="mine-decided" class="list"></div>
+    </section>
   </div>
 
   <!-- Вкладка погоджувача -->
   <div id="tab-queue" class="tab-panel" hidden>
-    <div id="queue-list" class="list"></div>
+    <section class="group">
+      <h2 class="group-title">Потребують вашого рішення <span id="queue-pending-count" class="count"></span></h2>
+      <div id="queue-pending" class="list"></div>
+    </section>
+
+    <section class="group">
+      <h2 class="group-title">Вже розглянуті <span id="queue-decided-count" class="count"></span></h2>
+      <div id="queue-decided" class="list"></div>
+    </section>
   </div>
 
   <!-- Вкладка адміністратора -->

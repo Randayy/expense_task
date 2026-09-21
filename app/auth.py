@@ -1,17 +1,30 @@
 """Паролі, сесії, перевірка ролей."""
 
 import hashlib
+import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
-from fastapi import Cookie, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import Cookie, Depends, HTTPException, Request
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session as DbSession
 
 from app.db import get_db
-from app.models import Role, Session, User
+from app.models import LoginAttempt, Role, Session, User
 
 SESSION_COOKIE = "session"
 PBKDF2_ROUNDS = 200_000
+
+# Скільки живе сесія від моменту входу
+SESSION_TTL = timedelta(days=int(os.getenv("SESSION_TTL_DAYS", "7")))
+
+# Захист від перебору пароля: скільки невдалих спроб і за який час
+MAX_LOGIN_ATTEMPTS = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
+LOGIN_WINDOW = timedelta(minutes=int(os.getenv("LOGIN_WINDOW_MINUTES", "15")))
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def hash_password(password: str) -> str:
@@ -31,7 +44,9 @@ def verify_password(password: str, stored: str) -> bool:
 
 def create_session(db: DbSession, user: User) -> str:
     token = secrets.token_urlsafe(32)
-    db.add(Session(token=token, user_id=user.id))
+    db.add(Session(token=token, user_id=user.id, expires_at=now() + SESSION_TTL))
+    # заразом прибираємо протухлі сесії цієї людини
+    db.execute(delete(Session).where(Session.user_id == user.id, Session.expires_at <= now()))
     db.commit()
     return token
 
@@ -51,10 +66,16 @@ def current_user(
     if not session:
         raise HTTPException(status_code=401, detail="Потрібно увійти")
 
-    user = db.scalar(select(User).join(Session).where(Session.token == session))
-    if user is None:
+    row = db.get(Session, session)
+    if row is None:
         raise HTTPException(status_code=401, detail="Сесія недійсна, увійдіть ще раз")
-    return user
+
+    if row.expires_at <= now():
+        db.delete(row)
+        db.commit()
+        raise HTTPException(status_code=401, detail="Сесія завершилася, увійдіть ще раз")
+
+    return db.get(User, row.user_id)
 
 
 def requires(role: Role, message: str):
@@ -71,3 +92,36 @@ def requires(role: Role, message: str):
 require_employee = requires(Role.employee, "Ви не можете подавати заявки")
 require_approver = requires(Role.approver, "Ви не погоджувач")
 require_admin = requires(Role.admin, "Потрібні права адміністратора")
+
+
+# --- захист входу від перебору ---------------------------------------------
+
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def check_login_allowed(db: DbSession, email: str) -> None:
+    """Кидає 429, якщо для цього email забагато невдалих спроб поспіль."""
+    db.execute(delete(LoginAttempt).where(LoginAttempt.created_at < now() - LOGIN_WINDOW))
+    db.commit()
+
+    failures = db.scalar(
+        select(func.count()).select_from(LoginAttempt).where(LoginAttempt.email == email)
+    )
+    if failures >= MAX_LOGIN_ATTEMPTS:
+        minutes = int(LOGIN_WINDOW.total_seconds() // 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Забагато невдалих спроб. Спробуйте ще раз через {minutes} хв",
+            headers={"Retry-After": str(int(LOGIN_WINDOW.total_seconds()))},
+        )
+
+
+def record_failed_login(db: DbSession, email: str, ip: str) -> None:
+    db.add(LoginAttempt(email=email, ip=ip))
+    db.commit()
+
+
+def clear_failed_logins(db: DbSession, email: str) -> None:
+    db.execute(delete(LoginAttempt).where(LoginAttempt.email == email))
+    db.commit()

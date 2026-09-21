@@ -3,20 +3,24 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DbSession
 
-from app import ai
+from app import ai, errors
 from app.auth import (
     SESSION_COOKIE,
+    check_login_allowed,
+    clear_failed_logins,
+    client_ip,
     create_session,
     current_user,
     drop_session,
     hash_password,
+    record_failed_login,
     require_admin,
     require_approver,
     require_employee,
@@ -29,6 +33,7 @@ from app.schemas import ClaimIn, LoginIn, RegisterIn, RejectIn, RolesIn, Routing
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="Expense Approval")
+errors.install(app)
 
 
 def now() -> datetime:
@@ -131,11 +136,21 @@ def register(data: RegisterIn, response: Response, db: DbSession = Depends(get_d
 
 
 @app.post("/api/login")
-def login(data: LoginIn, response: Response, db: DbSession = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == data.email.lower()))
+def login(
+    data: LoginIn,
+    response: Response,
+    request: Request,
+    db: DbSession = Depends(get_db),
+):
+    email = data.email.lower()
+    check_login_allowed(db, email)
+
+    user = db.scalar(select(User).where(User.email == email))
     if user is None or not verify_password(data.password, user.password_hash):
+        record_failed_login(db, email, client_ip(request))
         raise HTTPException(status_code=401, detail="Невірний email або пароль")
 
+    clear_failed_logins(db, email)
     token = create_session(db, user)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", path="/")
     return user_out(user)
@@ -159,13 +174,43 @@ def me(user: User = Depends(current_user)):
 
 
 @app.get("/api/categories")
-def categories(db: DbSession = Depends(get_db)):
+def categories(_: User = Depends(current_user), db: DbSession = Depends(get_db)):
     """Категорії та хто їх погоджує — щоб заявник бачив, куди піде заявка."""
     routing = {row.category: row.approver.name for row in db.scalars(select(CategoryApprover))}
     return [
         {"category": c.value, "approver": routing.get(c)}  # None = погоджувача ще немає
         for c in Category
     ]
+
+
+# --- посторінковий вивід ----------------------------------------------------
+
+PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
+
+# Заявки показуємо двома окремими списками: ті, що чекають рішення,
+# і ті, з якими вже все ясно. Змішувати їх в одну купу незручно.
+STATE = Query("all", pattern="^(all|pending|decided)$")
+
+
+def by_state(query, state: str):
+    if state == "pending":
+        return query.where(Claim.status == Status.pending)
+    if state == "decided":
+        return query.where(Claim.status != Status.pending)
+    return query
+
+
+def page_of_claims(query, db: DbSession, limit: int, offset: int) -> dict:
+    """Одна сторінка заявок плюс загальна кількість — щоб фронт знав, чи є ще."""
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    claims = db.scalars(query.limit(limit).offset(offset)).unique()
+    return {
+        "items": [claim_out(c) for c in claims],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 # --- заявник ----------------------------------------------------------------
@@ -193,11 +238,15 @@ def create_claim(
 
 
 @app.get("/api/claims/mine")
-def my_claims(user: User = Depends(current_user), db: DbSession = Depends(get_db)):
-    claims = db.scalars(
-        select(Claim).where(Claim.employee_id == user.id).order_by(Claim.id.desc())
-    ).unique()
-    return [claim_out(c) for c in claims]
+def my_claims(
+    user: User = Depends(current_user),
+    db: DbSession = Depends(get_db),
+    limit: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
+    state: str = STATE,
+):
+    query = select(Claim).where(Claim.employee_id == user.id).order_by(Claim.id.desc())
+    return page_of_claims(by_state(query, state), db, limit, offset)
 
 
 @app.post("/api/claims/{claim_id}/withdraw")
@@ -219,14 +268,26 @@ def withdraw(claim_id: int, user: User = Depends(current_user), db: DbSession = 
 # --- погоджувач -------------------------------------------------------------
 
 @app.get("/api/claims/queue")
-def queue(user: User = Depends(require_approver), db: DbSession = Depends(get_db)):
+def queue(
+    user: User = Depends(require_approver),
+    db: DbSession = Depends(get_db),
+    limit: int = Query(PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    offset: int = Query(0, ge=0),
+    state: str = STATE,
+):
     """Черга саме цього погоджувача: спочатку те, що чекає рішення."""
-    claims = db.scalars(
+    query = (
         select(Claim)
         .where(Claim.approver_id == user.id)
         .order_by((Claim.status != Status.pending), Claim.id.desc())
-    ).unique()
-    return [claim_out(c) for c in claims]
+    )
+    page = page_of_claims(by_state(query, state), db, limit, offset)
+    page["pending"] = db.scalar(
+        select(func.count())
+        .select_from(Claim)
+        .where(Claim.approver_id == user.id, Claim.status == Status.pending)
+    )
+    return page
 
 
 @app.get("/api/claims/{claim_id}")
@@ -345,13 +406,13 @@ def admin_routing(_: User = Depends(require_admin), db: DbSession = Depends(get_
     }
 
 
-@app.put("/api/admin/routing/{category}")
+@app.put("/api/admin/routing")
 def admin_set_routing(
-    category: Category,
     data: RoutingIn,
     _: User = Depends(require_admin),
     db: DbSession = Depends(get_db),
 ):
+    category = data.category
     approver = db.get(User, data.approver_id)
     if approver is None:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
@@ -370,9 +431,41 @@ def admin_set_routing(
 
 # --- фронтенд ---------------------------------------------------------------
 
+@app.middleware("http")
+async def no_cache_for_frontend(request: Request, call_next):
+    """Фронтенд не кешуємо.
+
+    Інакше браузер може лишити в себе стару index.html поруч зі свіжим app.js —
+    скрипт не знайде елемента, впаде на старті, і сторінка просто перестане
+    реагувати на кліки. Файли тут крихітні, кеш нічого не економить.
+    """
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def asset_version() -> str:
+    """Мітка версії фронтенду — час останньої зміни css/js."""
+    newest = max((STATIC_DIR / name).stat().st_mtime for name in ("style.css", "app.js"))
+    return str(int(newest))
 
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    """Віддаємо сторінку з версією на посиланнях.
+
+    Без цього браузер може роками тримати стару style.css поруч зі свіжим
+    app.js — і сторінка мовчки перестане працювати. Змінився файл — змінилось
+    посилання, і кеш уже не допоможе.
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    version = asset_version()
+    html = html.replace("/static/style.css", f"/static/style.css?v={version}")
+    html = html.replace("/static/app.js", f"/static/app.js?v={version}")
+    return HTMLResponse(html)

@@ -1,4 +1,8 @@
-# Postgres для розробки. Порт 5434, щоб не конфліктувати з локальними інстансами.
+# Усе одним запуском: docker compose up
+#
+# Піднімає базу, створює таблиці, наповнює їх прикладами і запускає застосунок.
+# Далі відкрити http://127.0.0.1:8010
+
 services:
   db:
     image: postgres:16-alpine
@@ -7,6 +11,7 @@ services:
       POSTGRES_USER: expense
       POSTGRES_PASSWORD: expense
       POSTGRES_DB: expense_approval
+    # Порт наверх — щоб можна було ходити в базу з хоста й гоняти тести
     ports:
       - "5434:5432"
     volumes:
@@ -15,7 +20,22 @@ services:
       test: ["CMD-SHELL", "pg_isready -U expense -d expense_approval"]
       interval: 3s
       timeout: 3s
-      retries: 10
+      retries: 15
+
+  app:
+    build: .
+    container_name: expense-app
+    # Чекаємо, поки база справді готова приймати запити
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://expense:expense@db:5432/expense_approval
+      # Якщо ключ є у вашому .env — AI-підказка увімкнеться сама
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    ports:
+      - "8010:8000"
 
 volumes:
   expense-pgdata:

@@ -19,7 +19,6 @@ MAIN_URL = os.getenv(
 _main = make_url(MAIN_URL)
 TEST_URL = _main.set(database=_main.database + "_test").render_as_string(hide_password=False)
 os.environ["DATABASE_URL"] = TEST_URL
-os.environ.pop("OPENAI_API_KEY", None)  # AI у тестах свідомо вимкнений
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -49,6 +48,16 @@ def test_database():
     with admin_engine.connect() as conn:
         conn.execute(text(f'DROP DATABASE IF EXISTS "{url.database}" WITH (FORCE)'))
     admin_engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def no_real_openai(monkeypatch):
+    """Жоден тест не має права звертатися до справжнього OpenAI.
+
+    Ключ може прилетіти з .env через load_dotenv() у app.db, тому знімаємо
+    його перед кожним тестом. Тести, яким AI потрібен, підставляють заглушку.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)

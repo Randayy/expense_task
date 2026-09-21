@@ -143,8 +143,8 @@ def test_queue_holds_only_my_claims(client, team):
 
     login(client, "travel@acme.com")
     queue = client.get("/api/claims/queue").json()
-    assert len(queue) == 1
-    assert queue[0]["category"] == "Travel"
+    assert queue["total"] == 1
+    assert queue["items"][0]["category"] == "Travel"
 
 
 def test_stranger_cannot_open_claim(client, team):
@@ -160,7 +160,7 @@ def test_employee_sees_only_own_claims(client, team):
     submit(client, Category.office)
 
     login(client, "admin@acme.com")
-    assert client.get("/api/claims/mine").json() == []
+    assert client.get("/api/claims/mine").json()["items"] == []
 
 
 # --- рішення ----------------------------------------------------------------
@@ -312,8 +312,8 @@ def test_admin_grants_approver_role(client, team):
 def test_admin_reassigns_category(client, team):
     login(client, "admin@acme.com")
     response = client.put(
-        f"/api/admin/routing/{Category.office.value}",
-        json={"approver_id": team["travel"].id},
+        "/api/admin/routing",
+        json={"category": Category.office.value, "approver_id": team["travel"].id},
     )
     assert response.status_code == 200
 
@@ -324,8 +324,8 @@ def test_admin_reassigns_category(client, team):
 def test_cannot_route_category_to_non_approver(client, team):
     login(client, "admin@acme.com")
     response = client.put(
-        f"/api/admin/routing/{Category.office.value}",
-        json={"approver_id": team["employee"].id},
+        "/api/admin/routing",
+        json={"category": Category.office.value, "approver_id": team["employee"].id},
     )
     assert response.status_code == 409
     assert "не має ролі погоджувача" in response.json()["detail"]
@@ -411,3 +411,191 @@ def test_broken_ai_degrades_quietly(client, team, monkeypatch):
     assert review.status_code == 200
     assert review.json()["available"] is False
     assert client.post(f"/api/claims/{claim_id}/approve").status_code == 200
+
+
+# --- закриті ендпоїнти ------------------------------------------------------
+
+def test_categories_require_login(client, team):
+    """Анонім не має бачити навіть імена погоджувачів."""
+    assert client.get("/api/categories").status_code == 401
+
+    login(client, "employee@acme.com")
+    assert client.get("/api/categories").status_code == 200
+
+
+# --- строк життя сесії ------------------------------------------------------
+
+def test_session_expires(client, team, db):
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.auth import now
+    from app.models import Session
+
+    login(client, "employee@acme.com")
+    assert client.get("/api/me").status_code == 200
+
+    # відмотуємо строк придатності в минуле
+    db.execute(update(Session).values(expires_at=now() - timedelta(minutes=1)))
+    db.commit()
+
+    response = client.get("/api/me")
+    assert response.status_code == 401
+    assert "завершилася" in response.json()["detail"]
+
+    # протухла сесія прибирається з бази
+    assert db.query(Session).count() == 0
+
+
+def test_fresh_session_has_future_expiry(client, team, db):
+    from app.auth import now
+    from app.models import Session
+
+    login(client, "employee@acme.com")
+    session = db.query(Session).one()
+    assert session.expires_at > now()
+
+
+# --- захист від перебору пароля ---------------------------------------------
+
+def test_login_locks_after_failed_attempts(client, team):
+    from app.auth import MAX_LOGIN_ATTEMPTS
+
+    for _ in range(MAX_LOGIN_ATTEMPTS):
+        assert client.post(
+            "/api/login", json={"email": "employee@acme.com", "password": "невірний"}
+        ).status_code == 401
+
+    # далі не пускає навіть із правильним паролем
+    blocked = client.post("/api/login", json={"email": "employee@acme.com", "password": PASSWORD})
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
+def test_successful_login_clears_failures(client, team):
+    from app.auth import MAX_LOGIN_ATTEMPTS
+
+    for _ in range(MAX_LOGIN_ATTEMPTS - 1):
+        client.post("/api/login", json={"email": "employee@acme.com", "password": "невірний"})
+
+    login(client, "employee@acme.com")  # вдалий вхід стирає історію
+
+    for _ in range(MAX_LOGIN_ATTEMPTS - 1):
+        assert client.post(
+            "/api/login", json={"email": "employee@acme.com", "password": "невірний"}
+        ).status_code == 401
+
+
+def test_lockout_is_per_email(client, team):
+    """Заблокований один email не блокує решту людей."""
+    from app.auth import MAX_LOGIN_ATTEMPTS
+
+    for _ in range(MAX_LOGIN_ATTEMPTS):
+        client.post("/api/login", json={"email": "employee@acme.com", "password": "невірний"})
+
+    assert client.post(
+        "/api/login", json={"email": "employee@acme.com", "password": PASSWORD}
+    ).status_code == 429
+    assert client.post(
+        "/api/login", json={"email": "office@acme.com", "password": PASSWORD}
+    ).status_code == 200
+
+
+# --- пагінація --------------------------------------------------------------
+
+def test_my_claims_are_paginated(client, team):
+    login(client, "employee@acme.com")
+    for i in range(25):
+        assert submit(client, Category.office, description=f"Заявка номер {i}").status_code == 201
+
+    first = client.get("/api/claims/mine").json()
+    assert first["total"] == 25
+    assert len(first["items"]) == 20  # сторінка за замовчуванням
+
+    second = client.get("/api/claims/mine?limit=20&offset=20").json()
+    assert len(second["items"]) == 5
+
+    # сторінки не перетинаються
+    ids = [c["id"] for c in first["items"]] + [c["id"] for c in second["items"]]
+    assert len(set(ids)) == 25
+
+
+def test_queue_is_paginated_and_counts_all_pending(client, team):
+    login(client, "employee@acme.com")
+    for i in range(22):
+        submit(client, Category.office, description=f"Заявка номер {i}")
+
+    login(client, "office@acme.com")
+    page = client.get("/api/claims/queue?limit=5").json()
+    assert len(page["items"]) == 5
+    assert page["total"] == 22
+    assert page["pending"] == 22  # лічильник рахує всі, не лише сторінку
+
+
+def test_page_size_is_capped(client, team):
+    login(client, "employee@acme.com")
+    assert client.get("/api/claims/mine?limit=500").status_code == 422
+    assert client.get("/api/claims/mine?limit=0").status_code == 422
+    assert client.get("/api/claims/mine?offset=-1").status_code == 422
+
+
+def test_category_with_slash_can_be_routed(client, team):
+    """«Software/Subscriptions» містить слеш — колись це ламало маршрут."""
+    login(client, "admin@acme.com")
+    response = client.put(
+        "/api/admin/routing",
+        json={"category": Category.software.value, "approver_id": team["office"].id},
+    )
+    assert response.status_code == 200
+    assert response.json()["category"] == "Software/Subscriptions"
+
+    login(client, "employee@acme.com")
+    claim = submit(client, Category.software, description="Підписка Figma на вересень")
+    assert claim.status_code == 201
+    assert claim.json()["approver_name"] == "Погоджувач Office"
+
+
+# --- окремі списки: що чекає рішення і що вже розглянуто --------------------
+
+def test_claims_split_into_pending_and_decided(client, team):
+    login(client, "employee@acme.com")
+    first = submit(client, Category.office, description="Перша заявка").json()["id"]
+    submit(client, Category.office, description="Друга заявка")
+    submit(client, Category.office, description="Третя заявка")
+
+    login(client, "office@acme.com")
+    client.post(f"/api/claims/{first}/approve")
+
+    # погоджувач: одна розглянута, дві в черзі
+    assert client.get("/api/claims/queue?state=pending").json()["total"] == 2
+    assert client.get("/api/claims/queue?state=decided").json()["total"] == 1
+    assert client.get("/api/claims/queue").json()["total"] == 3
+
+    # заявник бачить той самий розподіл своїх заявок
+    login(client, "employee@acme.com")
+    assert client.get("/api/claims/mine?state=pending").json()["total"] == 2
+    assert client.get("/api/claims/mine?state=decided").json()["total"] == 1
+
+
+def test_decided_list_holds_every_final_status(client, team):
+    login(client, "employee@acme.com")
+    approved = submit(client, Category.office, description="Буде погоджена").json()["id"]
+    rejected = submit(client, Category.office, description="Буде відхилена").json()["id"]
+    withdrawn = submit(client, Category.office, description="Буде відкликана").json()["id"]
+    client.post(f"/api/claims/{withdrawn}/withdraw")
+
+    login(client, "office@acme.com")
+    client.post(f"/api/claims/{approved}/approve")
+    client.post(f"/api/claims/{rejected}/reject", json={"comment": "Немає чека"})
+
+    login(client, "employee@acme.com")
+    decided = client.get("/api/claims/mine?state=decided").json()
+    assert decided["total"] == 3
+    assert {c["status"] for c in decided["items"]} == {"approved", "rejected", "withdrawn"}
+    assert client.get("/api/claims/mine?state=pending").json()["total"] == 0
+
+
+def test_unknown_state_rejected(client, team):
+    login(client, "employee@acme.com")
+    assert client.get("/api/claims/mine?state=вигадка").status_code == 422

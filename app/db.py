@@ -1,5 +1,3 @@
-"""Підключення до PostgreSQL."""
-
 import os
 
 from dotenv import load_dotenv
@@ -18,7 +16,6 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def get_db():
-    """Залежність FastAPI: одна сесія БД на один запит."""
     db = SessionLocal()
     try:
         yield db
